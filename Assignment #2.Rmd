@@ -11,6 +11,7 @@ library(sf)
 library(spdep)
 library(caret)
 library(ckanr)
+library(mapview)
 library(FNN)
 library(grid)
 library(gridExtra)
@@ -94,12 +95,16 @@ nn_function <- function(measureFrom,measureTo,k) {
 ## Data Wrangling
 
 ```{r setup, include=FALSE}
-dat <- st_read("/Users/yimingjin/Desktop/MUSA_508/4th&5th. Lec + Lab/Lab4-5/studentsData.geojson")
+### dat <- st_read("/Users/yimingjin/Desktop/MUSA_508/4th&5th. Lec + Lab/Lab4-5/studentsData.geojson")
+### mapview::mapview(dat)
+### Sorry but I have to used the link on my laptop here. 
+
+dat <- st_read("E:/Fall2020/MUSA-508_PublicPolicyAnalytics/Mid_term_Project/studentsData.geojson")
 mapview::mapview(dat)
 
 miami.base <- 
   st_read("https://opendata.arcgis.com/datasets/5ece0745e24b4617a49f2e098df8117f_0.geojson")%>%
-  filter(NAME %in% c("MIAMI","MIAMI BEACH"))
+  filter(NAME %in% c("MIAMI","MIAMI BEACH")) 
 
 dat <- dat%>%
   mutate(priceFt=SalePrice/LivingSqFt)
@@ -114,30 +119,199 @@ ggplot()+
   mapTheme()
 
 ```
+## Facotrs for public servives
+```{r}
+
+### landmark (facilities such as parks, schools, parking lots, restaurant, etc.) 
+### https://datahub-miamigis.opendata.arcgis.com/datasets/landmarks/data?page=10
+landsmark <- st_read("hhttps://opendata.arcgis.com/datasets/d74e47be08ff41f9ae88beba2064203c_0.geojson")
+
+### parks 
+### https://gis-mdc.opendata.arcgis.com/datasets/park-facility/geoservice?geometry=-80.463%2C25.688%2C-79.942%2C25.797
+park <- st_read("https://opendata.arcgis.com/datasets/8c9528d3e1824db3b14ed53188a46291_0.geojson")
+
+### Transit station
+### https://gis-mdc.opendata.arcgis.com/datasets/metrorail-station/geoservice
+metrorail <- st_read("https://opendata.arcgis.com/datasets/ee3e2c45427e4c85b751d8ad57dd7b16_0.geojson")
+```
+
+## Facotrs for internal characteristics
+
+```{r}
+names(dat)
+### Then use "dat <- dplyr::select()" to select the internal characteristics
+```
+
+## Separate train data
+```{r}
+dat_toPredict <- subset(dat, dat$SalePrice == 0)
+dat_toTrain <- subset(dat, dat$SalePrice != 0)
+```
+
+## Correlation
+```{r}
+### Corr matrix
+numericVars <- 
+  select_if(st_drop_geometry(dat_toPredict), is.numeric) %>% na.omit()
+
+ggcorrplot(
+  round(cor(numericVars), 1), 
+  p.mat = cor_pmat(numericVars),
+  colors = c("#25CB10", "white", "#FA7800"),
+  type="lower",
+  insig = "blank") +  
+    labs(title = "Correlation across numeric variables") 
+```
+## Multivariate Linear Regression
+```{r}
+### reg1 <- lm(SalePrice ~ ., data = st_drop_geometry(boston.sf) %>% 
+###                                 dplyr::select(SalePrice, LivingArea, 
+###                                               GROSS_AREA, R_TOTAL_RM, NUM_FLOORS,
+###                                               R_BDRMS, R_FULL_BTH, R_HALF_BTH, 
+###                                              R_KITCH, R_FPLACE))
+### summary(reg1)
+```
 
 
-```{r setup, include=FALSE}
+## Measure generalizability __ Cross-validation
+```{r}
+### use caret package cross-validation method
+### k = 10, may need to be changed later
+fitControl <- caret::trainControl(method = "cv", 
+                           number = 10,
+                           # savePredictions differs from book
+                           savePredictions = TRUE)
+set.seed(717)
+### crimes.buffer feature added
+### for k-folds CV
+reg.cv <- 
+  caret::train(SalePrice ~ ., data = st_drop_geometry(dat_toTrain) %>% 
+                                dplyr::select(SalePrice, LotSize,  
+                                               Bed, YearBuilt), 
+     method = "lm", 
+     trControl = fitControl, 
+     na.action = na.pass)
+
+reg.cv
+### Need to select the variables later in the dplyr:select 
+
+### visualize the k-folds results
+
+reg.cv$resample
+
+reg.cv$resample %>% 
+  pivot_longer(-Resample) %>% 
+  mutate(name = as.factor(name)) %>% 
+  ggplot(., aes(x = name, y = value, color = name)) +
+  geom_jitter(width = 0.1) +
+  facet_wrap(~name, ncol = 3, scales = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+```
+## Interpret the spread of values between the folds
+
+```{r}
+# extract predictions from CV object
+cv_preds <- reg.cv$pred
+# compare number of observations between data sets (why we have to do so?)
+nrow(dat_toTrain)
+nrow(cv_preds)
+
+## Create dataset with "out of fold" predictions and original data
+
+map_preds <- dat_toTrain %>% 
+  rowid_to_column(var = "rowIndex") %>% 
+  left_join(cv_preds, by = "rowIndex") %>% 
+  mutate(SalePrice.AbsError = abs(pred - SalePrice)) %>% 
+  cbind(st_coordinates(.))
+
+### !!!It is strange to show that the numbers of rows are different since in this step since the nrow()shows that the dat_toTrain and cv_predict ARE THE SAME IN COLUMN NUMBER!!!
+
+# weird CRS fix to dat_toTrain
+#st_crs(map_preds) <- st_crs(nhoods)
+
+### Need we find a neighborhood map ourselves with geo info??
+
+### plot errors on a map
+#ggplot() +
+#    geom_sf(data = nhoods, fill = "grey40") +
+#    geom_sf(data = map_preds, aes(colour = q5(SalePrice.AbsError)),
+#            show.legend = "point", size = 1) +
+#    scale_colour_manual(values = palette5,
+#                     labels=qBr(map_preds,"SalePrice.AbsError"),
+#                     name="Quintile\nBreaks") +
+#    labs(title="Absolute sale price errors on the OOF set",
+#        subtitle = "OOF = 'Out Of Fold'") +
+#    mapTheme()
+```
 
 
+## Spatial Correlation of Error
+
+```{r}
+
+#inTrain <- createDataPartition(
+#              y = paste(dat_toTrain$$Name, dat_toTrain$NUM_FLOORS.cat, 
+#                        dat_toTrain$Style, dat_toTrain$R_AC), 
+#              p = .60, list = FALSE)
+#miami.training <- dat_toTrain[inTrain,] 
+#miami.test <- dat_toTrain[-inTrain,]  
+
+### How to create "Name" column in the dat_toTrain? Does the name of Boston.sf data come from the neighborhood map?
 
 ```
 
-## R Markdown
+```{r}
+reg.training <- 
+  lm(SalePrice ~ ., data = as.data.frame(miami.training) %>% 
+                             dplyr::select(SalePrice, LivingArea, Style, 
+                                           GROSS_AREA, NUM_FLOORS.cat,
+                                           R_BDRMS, R_FULL_BTH, R_HALF_BTH, 
+                                           R_KITCH, R_AC, R_FPLACE, crimes.Buffer))
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+miami.test <- 
+  miami.test %>%
+  mutate(Regression = "Baseline Regression",
+         SalePrice.Predict = predict(reg.training, boston.test),
+         SalePrice.Error = SalePrice.Predict - SalePrice,
+         SalePrice.AbsError = abs(SalePrice.Predict - SalePrice),
+         SalePrice.APE = (abs(SalePrice.Predict - SalePrice)) / SalePrice.Predict)%>%
+  filter(SalePrice < 5000000) 
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+## Examine if there exist Spatial Correlation of Errors
+```{r}
+### knn + Moran's I 
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## Neighborhood Fixed Effect
+
+```{r}
+reg.nhood <- lm(SalePrice ~ ., data = as.data.frame(miami.training) %>% 
+                                 dplyr::select(Name, SalePrice, LivingArea, 
+                                               Style, GROSS_AREA, NUM_FLOORS.cat,
+                                               R_BDRMS, R_FULL_BTH, R_HALF_BTH, 
+                                               R_KITCH, R_AC, R_FPLACE,crimes.Buffer))
+
+miami.test.nhood <-
+  miami.test %>%
+  mutate(Regression = "Neighborhood Effects",
+         SalePrice.Predict = predict(reg.nhood, miami.test),
+         SalePrice.Error = SalePrice - SalePrice.Predict,
+         SalePrice.AbsError = abs(SalePrice - SalePrice.Predict),
+         SalePrice.APE = (abs(SalePrice - SalePrice.Predict)) / SalePrice) %>%
+  filter(SalePrice < 5000000)
+```
+
+## Answer for the final results
+
+```{r}
+# model coefficents for each Neighborhood
+tidy(reg.nhood) %>% 
+  filter(str_detect(term, "Name")) %>% 
+  kable() %>% 
+  kable_styling()
+```
